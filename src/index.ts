@@ -2,10 +2,14 @@ import { v4 as uuidv4 } from "uuid";
 import * as WebSocket from "ws";
 import * as http from "http";
 import express from "express";
+import path from "path";
 
 // Creare l'app Express
 const app = express();
 const port = 3000;
+
+// Servire i file statici dell'app React
+app.use(express.static(path.join(__dirname, "..", "frontend", "build")));
 
 // Creare un server HTTP
 const server = http.createServer(app);
@@ -23,6 +27,35 @@ const createSession = (): string => {
    return sessionId;
 };
 
+// Funzione per pulire le sessioni morte o complete
+const cleanupSessions = () => {
+   for (const sessionId in sessions) {
+      const session = sessions[sessionId];
+
+      // Verifica se tutti i giocatori della sessione sono disconnessi
+      const allPlayersDisconnected = session.players.every(
+         (player) => player.readyState === WebSocket.CLOSED
+      );
+
+      // Rimuovi sessioni "morte" (tutti i giocatori disconnessi)
+      if (allPlayersDisconnected) {
+         console.log(`Rimozione sessione ${sessionId}: tutti i giocatori disconnessi.`);
+         delete sessions[sessionId];
+         continue;
+      }
+
+      // Verifica se la sessione è "completa" (partita terminata)
+      const isBoardFull = session.board.every((cell) => cell !== null);
+      if (isBoardFull) {
+         console.log(`Rimozione sessione ${sessionId}: partita completa.`);
+         delete sessions[sessionId];
+      }
+   }
+};
+
+// Esegui cleanup ogni 60 secondi
+setInterval(cleanupSessions, 60000);
+
 // Gestione delle connessioni WebSocket
 wss.on("connection", (ws: WebSocket) => {
    console.log("Nuova connessione WebSocket.");
@@ -34,13 +67,11 @@ wss.on("connection", (ws: WebSocket) => {
 
          switch (type) {
             case "create":
-               // Creare una nuova sessione di gioco
                const newSessionId = createSession();
                ws.send(JSON.stringify({ type: "session_created", sessionId: newSessionId }));
                break;
 
             case "join":
-               // Aggiungi un giocatore a una sessione esistente
                if (sessionId && sessions[sessionId]) {
                   sessions[sessionId].players.push(ws);
                   if (sessions[sessionId].players.length === 2) {
@@ -49,6 +80,20 @@ wss.on("connection", (ws: WebSocket) => {
                            JSON.stringify({ type: "start_game", message: "La partita inizia!" })
                         )
                      );
+                  } else if (sessions[sessionId].players.length < 2) {
+                     ws.send(
+                        JSON.stringify({
+                           type: "session_join",
+                           message: "Manca un giocatore per iniziare"
+                        })
+                     );
+                  } else {
+                     ws.send(
+                        JSON.stringify({
+                           type: "session_full",
+                           message: "La partita è gia piena!"
+                        })
+                     );
                   }
                } else {
                   ws.send(JSON.stringify({ type: "error", message: "Sessione non trovata." }));
@@ -56,10 +101,9 @@ wss.on("connection", (ws: WebSocket) => {
                break;
 
             case "move":
-               // Gestire una mossa di gioco
                if (sessionId && sessions[sessionId] && position != null) {
                   const session = sessions[sessionId];
-                  session.board[position] = "X"; // Per semplicità, assegniamo sempre 'X'. In un'implementazione completa gestiremmo turni e convalida.
+                  session.board[position] = session.players[0] == ws ? "X" : "O";
                   session.players.forEach((player) =>
                      player.send(JSON.stringify({ type: "move", position, board: session.board }))
                   );
@@ -79,13 +123,12 @@ wss.on("connection", (ws: WebSocket) => {
 
    ws.on("close", () => {
       console.log("Connessione WebSocket chiusa.");
-      // Gestire la logica di chiusura del giocatore/sessione, se necessario
    });
 });
 
-// Endpoint di test per verificare il server HTTP
-app.get("/", (req, res) => {
-   res.send("Server Tic Tac Toe attivo.");
+// Endpoint per gestire tutte le richieste e servire l'app React
+app.get("*", (req, res) => {
+   res.sendFile(path.join(__dirname, "..", "frontend", "build", "index.html"));
 });
 
 // Avviare il server
